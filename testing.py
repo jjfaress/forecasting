@@ -13,7 +13,7 @@ import os
 import seaborn as sns
 from matplotlib import pyplot as plt
 import string
-from sklearn.utils import resample
+import json
 
 stop = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you',
         "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself',
@@ -35,6 +35,18 @@ stop = ['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you',
         'wasn', "wasn't", 'weren', "weren't", "won't", 'wouldn']
 
 
+def load_dataset(*src_filenames, labels=None):
+    data = []
+    for filename in src_filenames:
+        with open(os.path.join(ROOT_DIR, 'data', 'dynasent-v1.1', 'dynasent'
+                                                                  '-v1.1-round01-yelp-train.jsonl')) as f:
+            for line in f:
+                d = json.loads(line)
+                if labels is None or d['gold_label'] in labels:
+                    data.append(d)
+    return data
+
+
 def keepNeutrals(df):
     return df[df['score'] == 2]
 
@@ -48,20 +60,12 @@ def scoreConfig(score, negatives=False):
         elif score == 'negative':
             return 1
     elif type(score) is int:
-        if negatives:
-            if score == 1:
-                return 3
-            if score == 0:
-                return 2
-            if score == -1:
-                return 1
-        else:
-            if score == 4:
-                return 3
-            elif score == 2:
-                return 2
-            elif score == 0:
-                return 1
+        if score == 4:
+            return 3
+        elif score == 2:
+            return
+        elif score == 0:
+            return 1
 
 
 def clean(text):
@@ -80,6 +84,8 @@ stanfordcsv = pd.read_csv(
     os.path.join(ROOT_DIR, 'data', 'stanford.csv'), encoding='latin-1').dropna()
 stanfordcsv.drop(columns=stanfordcsv.columns[1:5], inplace=True)
 stanfordcsv.columns = ['score', 'text']
+stanfordcsv = stanfordcsv.sample(frac=1)
+
 
 airlinecsv = pd.read_csv(
     os.path.join(ROOT_DIR, 'data', 'Tweets.csv'))[
@@ -90,79 +96,60 @@ financecsv = pd.read_csv(
     os.path.join(ROOT_DIR, 'data', 'data.csv')).dropna()
 financecsv.columns = ['text', 'score']
 
-reddit = pd.read_csv(
-    os.path.join(ROOT_DIR, 'data', 'Reddit_Data.csv')).dropna()
-reddit.columns = ['text', 'score']
-
-twitter = pd.read_csv(
-    os.path.join(ROOT_DIR, 'data', 'Twitter_Data.csv')).dropna()
-twitter.columns = ['text', 'score']
+dyna = load_dataset('dynasent-v1.1-round01-yelp-train.jsonl', labels=('positive', 'negative', 'neutral'))
+dyna = pd.DataFrame(dyna)
+dyna = pd.concat((dyna['sentence'], dyna['gold_label']), axis=1)
+dyna.columns = ['text', 'score']
 
 headlines = pd.read_csv(
     os.path.join(ROOT_DIR, 'data', 'all-data.csv'), encoding='latin-1').dropna()
 headlines.columns = ['score', 'text']
 
-neutrals = reddit.append(twitter, ignore_index=True)
+data = financecsv.append(headlines, ignore_index=True)
+data = data.append(dyna[:30000], ignore_index=True)
+data = data.append(stanfordcsv[:50000], ignore_index=True)
 
-neutrals = neutrals[neutrals['score'] == 0]
-neutrals['score'].replace({0: 2}, inplace=True)
-
-stanfordcsv['text'] = stanfordcsv['text'].apply(lambda r: clean(r))
-stanfordcsv['score'] = stanfordcsv['score'].apply(scoreConfig)
-airlinecsv['text'] = airlinecsv['text'].apply(lambda r: clean(r))
-airlinecsv['score'] = airlinecsv['score'].apply(scoreConfig)
-financecsv['text'] = financecsv['text'].apply(lambda r: clean(r))
-financecsv['score'] = financecsv['score'].apply(scoreConfig)
-headlines['text'] = headlines['text'].apply(lambda r: clean(r))
-headlines['score'] = headlines['score'].apply(scoreConfig)
-
-headlines = headlines[headlines['score'] == 2]
-
-data = stanfordcsv.append(airlinecsv, ignore_index=True)
-data = data.append(financecsv, ignore_index=True)
-data = data.append(neutrals, ignore_index=True)
-data = data.append(headlines, ignore_index=True)
+data['text'] = data['text'].apply(lambda r: clean(r))
+data['score'] = data['score'].apply(scoreConfig)
 data.dropna(inplace=True)
-nSample = data[data['score'] == 1]
-neutralSample = data[data['score'] == 2]
-pSample = data[data['score'] == 3]
-balanced = pd.concat(
-    [neutralSample, nSample[:len(neutralSample)], pSample[:len(neutralSample)]],
-    axis=0)
+data = data.sample(frac=1)
 
-x = balanced['text']
-y = balanced['score']
-
+x = data['text']
+y = data['score']
 sns.set()
 sns.displot(data=y)
 plt.show()
 y = pd.get_dummies(y)
 
 maxLen = 200
-embSize = 42
-vocabSize = 100000
-filters = 28
+embSize = 64
+vocabSize = 80000
 
 tk = Tokenizer(num_words=vocabSize, oov_token='oov_tok')
 tk.fit_on_texts(x)
 xSeq = tk.texts_to_sequences(x)
 xPad = pad_sequences(xSeq, maxlen=maxLen)
 xTrain, xTest, yTrain, yTest = train_test_split(xPad, y, test_size=0.2)
+
 model = Sequential()
 model.add(layers.Embedding(vocabSize, embSize, input_length=maxLen))
 model.add(layers.SpatialDropout1D(0.3))
+model.add(layers.Conv1D(16, 32, padding='same', input_shape=(maxLen, embSize)))
+model.add(layers.Activation('relu'))
 model.add(layers.MaxPooling1D())
-model.add(Bidirectional(layers.LSTM(16, dropout=0.3)))
-model.add(layers.Dropout(0.1))
-model.add(layers.Dense(3))
-model.add(layers.Activation('softmax'))
+model.add(layers.SpatialDropout1D(0.4))
+model.add(Bidirectional(layers.LSTM(16, return_sequences=True)))
+model.add(Bidirectional(layers.LSTM(16)))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(3, activation='softmax'))
 
 model.summary()
 
-rms = tf.keras.optimizers.RMSprop(learning_rate=0.005)
+adam = tf.keras.optimizers.Adam(learning_rate=0.01, decay=0.85)
+rms = tf.keras.optimizers.RMSprop(learning_rate=0.001)
 
 model.compile(
-    optimizer=rms,
+    optimizer=adam,
     loss='categorical_crossentropy',
     metrics=['accuracy'],
 )
@@ -182,8 +169,8 @@ modelDir = os.path.join(ROOT_DIR, 'models', 'sentiment')
 history = model.fit(
     xTrain,
     yTrain,
-    epochs=5,
-    batch_size=256,
+    epochs=30,
+    batch_size=512,
     validation_split=0.2,
     callbacks=[cp_callback, tensorboard_callback],
 )
